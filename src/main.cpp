@@ -22,13 +22,30 @@
 #include "esp32-hal.h"
 #include <HardwareSerial.h>
 #include <Wire.h>
-#include "SSD1306Wire.h"
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <inttypes.h> 
 
-#define MOTOR_POLES 14
+Adafruit_MPU6050 mpu;
+
+#define MOTOR_POLES 9
+#define potentiometer 4
 #define MINIQUADTESTBENCH
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 long thrust = 0;
+
+int speed = 0;
+float prev_vol = 0;
+float current_vol = 0;
+float delta_vol = 0;
 
 TaskHandle_t Task1;
 
@@ -42,9 +59,6 @@ volatile int interruptCounter;
 int totalInterruptCounter;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
-
-//SSD1306Wire display(0x3c, 21, 22);  // 21 and 22 are default pins
-
 uint8_t receivedBytes = 0;
 volatile bool requestTelemetry = false;
 bool printTelemetry = true;
@@ -52,8 +66,7 @@ bool up = true;
 volatile uint16_t dshotUserInputValue = 0;
 uint16_t dshotmin = 48;
 uint16_t dshotmax = 2047;
-//uint16_t dshotidle = dshotmin + round(3.5 * (dshotmax - dshotmin) / 100); // 3.5%
-uint16_t dshotidle = 300;
+uint16_t dshotidle = dshotmin + round(3.5 * (dshotmax - dshotmin) / 100); // 3.5%
 uint16_t dshot50 =   dshotmin + round(50 * (dshotmax - dshotmin) / 100); // 50%
 uint16_t dshot75 =   dshotmin + round(75 * (dshotmax - dshotmin) / 100); // 75%
 int16_t ESC_telemetrie[5]; // Temperature, Voltage, Current, used mAh, eRpM
@@ -136,6 +149,31 @@ void setup() {
   Serial.begin(115200);
   Serial.print("init starting\n");
 
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+
+    if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+
+  Serial.println("MPU6050 Found!");
+
+  //setupt motion detection
+  mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
+  mpu.setMotionDetectionThreshold(1);
+  mpu.setMotionDetectionDuration(20);
+  mpu.setInterruptPinLatch(true);  // Keep it latched.  Will turn off when reinitialized.
+  mpu.setInterruptPinPolarity(true);
+  mpu.setMotionInterrupt(true);
+
+
+  pinMode(16, INPUT);
+
   if ((rmt_send = rmtInit(5, true, RMT_MEM_64)) == NULL) {
     Serial.println("init sender failed\n");
   }
@@ -162,32 +200,45 @@ void loop() {
  
   printTelemetry = false ;
 
+  sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    /* Print out the values */
+    Serial.print("AccelX:");
+    Serial.print(a.acceleration.x);
+    Serial.print(",");
+    Serial.print("AccelY:");
+    Serial.print(a.acceleration.y);
+    Serial.print(",");
+    Serial.print("AccelZ:");
+    Serial.print(a.acceleration.z);
+    // current_vol = sqrt((sq(a.acceleration.x)) + sq(a.acceleration.y) + sq(a.acceleration.z));
+    current_vol = a.acceleration.y;
+    Serial.println();
+    Serial.print("Combined Accel:");
+    Serial.print(current_vol);
+    delta_vol = abs(current_vol - prev_vol);
+    Serial.println();
+    Serial.print("Change in Accel:");
+    Serial.print(delta_vol);
+    Serial.println();
+    speed = delta_vol * 20;
+
   if (interruptCounter > 0) {
   portENTER_CRITICAL(&timerMux);
   interruptCounter--;
   portEXIT_CRITICAL(&timerMux);
   totalInterruptCounter++;
   } 
-  
-  if (totalInterruptCounter % 250  == 0) {
-    totalInterruptCounter = 0;
-    if ( ( dshotUserInputValue < 1390 && up ) || ( dshotUserInputValue > dshotidle && !up )) {
-      
-       if ( up ==  true ) { 
-         portENTER_CRITICAL(&timerMux);
-         dshotUserInputValue += 20;  
-         portEXIT_CRITICAL(&timerMux);
-       } else { 
-         portENTER_CRITICAL(&timerMux); 
-         dshotUserInputValue -= 20;
-         portEXIT_CRITICAL(&timerMux);
-       }
-    } else {
-     up = !up; 
-    }
+  dshotUserInputValue = map(analogRead(potentiometer), 0, 4095, dshotmin, dshotmax)*(delta_vol/30);
+  // dshotUserInputValue = speed;
+  display.clearDisplay();
+  display.fillRect(0, 0, map(dshotUserInputValue, dshotmin, dshotmax, 0, SCREEN_WIDTH), 8, SSD1306_WHITE);
+  // display.setTextSize(1);      // Normal 1:1 pixel scale
+  // display.setTextColor(SSD1306_WHITE); // Draw white text
+  // display.setCursor(0, 20);     // Start at top-left corner
+  // display.cp437(true);         // Use full 256 char 'Code Page 437' font
+  display.display();
   
   Serial.printf("dshot value : %i   totalinterruptcounter: %i \n", dshotUserInputValue, totalInterruptCounter);
   } 
-  
-}
-
